@@ -1,0 +1,327 @@
+---
+title: "Eir - Churn Prediction"
+author: "Antti Uusitalo"
+date: "26 April 2016"
+output: html_document
+---
+
+After we're done cleaning up the data, which in this case was mostly just reformatting strings for better plot readability, I start looking at variables that have the biggest volumes, and how they behave differently with the output variable. 
+
+```{r include=FALSE, cache=FALSE}
+library(data.table)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(caret)
+library(car)
+library(xgboost)
+library(readr)
+library(gridExtra)
+library(scales)
+library(ROCR)
+library(DMwR)
+
+set.seed(123)
+
+train <- fread("train.csv", stringsAsFactors = TRUE)
+test <- fread("test.csv", stringsAsFactors = FALSE)
+
+train$CHURN <- as.factor(train$CHURN)
+
+train[,TENURE:= revalue(train$TENURE, c("1 - Less than 12 months"="<1y", 
+  "2 - 12 to 36 months"="1-2y", 
+  "3 - 36 to 60 months"="3-5y", 
+  "4 - Over 60 months"=">5y"))]
+
+
+```
+
+***
+
+### We start off by looking at each of the variables individually:
+
+*Note that that orange dash line marks the overall Churn mean in the training dataset.*
+
+
+```{r, echo=FALSE, warning=FALSE, fig.width = 7, fig.height = 3.4}
+
+ggplot(train, aes(x = VOICE_USAGE, fill = CHURN)) +
+     geom_bar(stat = "count", position = "fill", width = 0.7) +
+     scale_fill_brewer(palette = "Set1") + 
+     scale_y_continuous(labels = percent) +
+     theme(axis.title.y=element_blank(), axis.title.x=element_blank(), panel.background = element_blank()) +
+     geom_hline(yintercept = 0.98014, colour="orange", linetype = "longdash", size=1.3) + 
+     coord_cartesian(ylim = c(0.95, 1)) -> voice_usage_freq
+
+train %>% count(VOICE_USAGE) %>%  
+    ggplot(aes(x = VOICE_USAGE, y = n)) +
+    geom_bar(stat = "identity") + 
+    labs(y = "Count", x = "") +
+    theme(panel.background = element_blank()) -> voice_usage_hist
+
+
+grid.arrange(voice_usage_freq, voice_usage_hist, ncol = 2, top = "Voice Usage")
+
+```
+
+
+We can see immediately that when there is no voice usage the risk of Churn is significantly higher. Too bad the actual count of people with no voice usage is the lowest of the four groups, meaning the end gain will remain quite low.
+
+***
+
+```{r, echo=FALSE, warning=FALSE, fig.width = 7, fig.height = 3.4}
+
+
+ggplot(train, aes(x = TENURE, fill = CHURN)) +
+     geom_bar(stat = "count", position = "fill", width = 0.7) +
+     scale_fill_brewer(palette = "Set1") + 
+     scale_y_continuous(labels = percent) +
+     theme(axis.title.y=element_blank(), axis.title.x=element_blank(), panel.background = element_blank()) +
+     geom_hline(yintercept = 0.98014, colour="orange", linetype = "longdash", size=1.3) + 
+     coord_cartesian(ylim = c(0.95, 1)) -> tenure_freq
+
+train %>% count(TENURE) %>%  
+    ggplot(aes(x = TENURE, y = n)) +
+    geom_bar(stat = "identity") + 
+    labs(y = "Count", x = "") +
+    theme(panel.background = element_blank()) -> tenure_hist
+
+grid.arrange(tenure_freq, tenure_hist, ncol = 2, top = "Time since account created")
+
+```
+
+Based on the plot we can see that customers that have been with us between 1-2 years are in most risk of churn.
+
+***
+
+```{r, echo=FALSE, warning=FALSE, fig.width = 7, fig.height = 3.4}
+ggplot(train, aes(x = CONTRACT, fill = CHURN)) +
+     geom_bar(stat = "count", position = "fill", width = 0.7) +
+     scale_fill_brewer(palette = "Set1") + 
+     scale_y_continuous(labels = percent) +
+     theme(axis.title.y=element_blank(), axis.title.x=element_blank(), panel.background = element_blank()) +
+     geom_hline(yintercept = 0.98014, colour="orange", linetype = "longdash", size=1.3) + 
+     coord_cartesian(ylim = c(0.95, 1)) -> contract_freq
+
+train %>% count(CONTRACT) %>%  
+    ggplot(aes(x = CONTRACT, y = n)) +
+    geom_bar(stat = "identity") + 
+    labs(y = "Count", x = "") +
+    theme(panel.background = element_blank()) -> contract_hist
+
+grid.arrange(contract_freq, contract_hist, ncol = 2, top = "Contract")
+```
+
+Both in and out of contract values seem to differ quite a bit compared to mean, and other variables. The volumes are also promisingly high, which makes this my favorite single feature for the model. Let's see how my prediction holds up when I plot the variable importances after training the model.
+
+***
+
+```{r, echo=FALSE, warning=FALSE, fig.width = 7, fig.height = 3.4}
+ggplot(train, aes(x = LOCATION, fill = CHURN)) +
+     geom_bar(stat = "count", position = "fill", width = 0.7) +
+     scale_fill_brewer(palette = "Set1") + 
+     scale_y_continuous(labels = percent) +
+     theme(axis.title.y=element_blank(), axis.title.x=element_blank(), panel.background = element_blank()) +
+     geom_hline(yintercept = 0.98014, colour="orange", linetype = "longdash", size=1.3) + 
+     coord_cartesian(ylim = c(0.95, 1)) -> location_freq
+
+train %>% count(LOCATION) %>%  
+    ggplot(aes(x = LOCATION, y = n)) +
+    geom_bar(stat = "identity") + 
+    labs(y = "Count", x = "") +
+    theme(panel.background = element_blank()) -> location_hist
+
+grid.arrange(location_freq, location_hist, ncol = 2, top = "Location")
+```
+
+***
+
+```{r, echo=FALSE, warning=FALSE, fig.width = 7, fig.height = 3.4}
+ggplot(train, aes(x = PRODUCT, fill = CHURN)) +
+     geom_bar(stat = "count", position = "fill", width = 0.7) +
+     scale_fill_brewer(palette = "Set1") + 
+     scale_y_continuous(labels = percent) +
+     theme(axis.title.y=element_blank(), axis.title.x=element_blank(), panel.background = element_blank()) +
+     geom_hline(yintercept = 0.98014, colour="orange", linetype = "longdash", size=1.3) + 
+     coord_cartesian(ylim = c(0.95, 1)) -> product_freq
+
+train %>% count(PRODUCT) %>%  
+    ggplot(aes(x = PRODUCT, y = n)) +
+    geom_bar(stat = "identity") + 
+    labs(y = "Count", x = "") +
+    theme(panel.background = element_blank()) -> product_hist
+
+grid.arrange(product_freq, product_hist, ncol = 2, top = "Product")
+```
+
+We don't have to spend more than two seconds here to realize the PRODUCT variable is utterly useless to predicting churn, as the probability is same for both values. Having said that, let's see if it'll help patterns with other variables.
+
+***
+
+```{r, echo=FALSE, warning=FALSE, fig.width = 7, fig.height = 3.4}
+ggplot(train, aes(x = MAX_POSSIBLE_BB, fill = CHURN)) +
+     geom_bar(stat = "count", position = "fill", width = 0.7) +
+     scale_fill_brewer(palette = "Set1") + 
+     scale_y_continuous(labels = percent) +
+     theme(axis.title.y=element_blank(), axis.title.x=element_blank(), panel.background = element_blank()) +
+     geom_hline(yintercept = 0.98014, colour="orange", linetype = "longdash", size=1.3) + 
+     coord_cartesian(ylim = c(0.95, 1)) -> max_possible_bb_freq
+
+train %>% count(MAX_POSSIBLE_BB) %>%  
+    ggplot(aes(x = MAX_POSSIBLE_BB, y = n)) +
+    geom_bar(stat = "identity") + 
+    labs(y = "Count", x = "") +
+    theme(panel.background = element_blank()) -> max_possible_bb_hist
+
+grid.arrange(max_possible_bb_freq, max_possible_bb_hist, ncol = 2, top = "Max Possible Broadband")
+```
+
+Value | Explanation
+------------- | -------------
+NO BB | Not possible to get Broadband
+DSL | Low speed broadband
+NGB | Average speed broadband
+NGA | Fibre broadband (high speed)
+
+Nice separation between all the four different values. Along with the Contract-variable this seems the most promising. 
+
+***
+
+```{r, echo=FALSE, warning=FALSE, fig.width = 7, fig.height = 3.4}
+ggplot(train, aes(x = SALES_CHANNEL, fill = CHURN)) +
+     geom_bar(stat = "count", position = "fill", width = 0.7) +
+     scale_fill_brewer(palette = "Set1") + 
+     scale_y_continuous(labels = percent) +
+     theme(axis.title.y=element_blank(), axis.title.x=element_blank(), panel.background = element_blank()) +
+     geom_hline(yintercept = 0.98014, colour="orange", linetype = "longdash", size=1.3) + 
+     coord_cartesian(ylim = c(0.95, 1)) -> sales_channel_freq
+
+train %>% count(SALES_CHANNEL) %>%  
+    ggplot(aes(x = SALES_CHANNEL, y = n)) +
+    geom_bar(stat = "identity") + 
+    labs(y = "Count", x = "") +
+    theme(panel.background = element_blank()) -> sales_channel_hist
+
+grid.arrange(sales_channel_freq, sales_channel_hist, ncol = 2, top = "Sales Channel")
+```
+
+While I love the FOTS (Field Sales) value here, the low frequency makes this finding a bit of an anti-climatic. 
+
+***
+
+```{r, echo=FALSE, warning=FALSE, fig.width = 7, fig.height = 3.4}
+ggplot(train, aes(x = DSP_FLAG, fill = CHURN)) +
+     geom_bar(stat = "count", position = "fill", width = 0.7) +
+     scale_fill_brewer(palette = "Set1") + 
+     scale_y_continuous(labels = percent) +
+     theme(axis.title.y=element_blank(), axis.title.x=element_blank(), panel.background = element_blank()) +
+     geom_hline(yintercept = 0.98014, colour="orange", linetype = "longdash", size=1.3) + 
+     coord_cartesian(ylim = c(0.95, 1)) -> dsp_flag_freq
+
+train %>% count(DSP_FLAG) %>%  
+    ggplot(aes(x = DSP_FLAG, y = n)) +
+    geom_bar(stat = "identity") + 
+    labs(y = "Count", x = "") +
+    theme(panel.background = element_blank()) -> dsp_flag_hist
+
+grid.arrange(dsp_flag_freq, dsp_flag_hist, ncol = 2, top = "DSP Flag")
+```
+
+Almost the same story as with the Product variable. Depending on how far I'm willing to push my model, I might leave this variable out. I'll need to keep these in for now though to see if I'll uncover any surprising combinations with other variables. 
+
+***
+
+Ok then, let's start with the model itself:
+
+```{r, echo=TRUE}
+
+set.seed(123) #favorite seed for reproductive code
+
+train <- fread("train.csv", stringsAsFactors = FALSE)
+test <- fread("test.csv", stringsAsFactors = FALSE)
+
+y <- as.numeric(train$CHURN)
+
+all <- rbind(train, test)
+all[,CHURN:=NULL]
+
+# just shortening the strings a bit
+all[,TENURE:= revalue(all$TENURE, c("1 - Less than 12 months"="<1y", 
+  "2 - 12 to 36 months"="1-2y", 
+  "3 - 36 to 60 months"="3-5y", 
+  "4 - Over 60 months"=">5y"))]
+
+all[,CONTRACT:= ifelse(CONTRACT == "IN",1,0)]
+all[,PRODUCT_VOICE_ONLY:= ifelse(PRODUCT == "VO",1,0)]
+all[,CUSTOMER_AGE_OVER_60:= ifelse(DSP_FLAG == "DSP",1,0)]
+all[,c("PRODUCT","DSP_FLAG"):=NULL]
+
+all <- as.data.frame(all)
+
+for (i in 1:length(colnames(all))) {
+  if (class(all[[i]]) == "character") {
+    colnames(all)[i] <- paste(colnames(all)[i], "_", sep="")
+  }
+}
+
+CharacterVars <- all[,sapply(all, is.character)]
+CharacterVarNames <- colnames(CharacterVars)
+dummyVars <- dummyVars(~., data = CharacterVars)
+dummyVars <- as.data.frame(predict(dummyVars, newdata = CharacterVars))
+all <- cbind(all[,-c(which(colnames(all) %in% CharacterVarNames))],dummyVars)
+rm(dummyVars, CharacterVars, CharacterVarNames)
+
+#Split cleaned up data set back into training and test sets
+X <- all[all$ACCOUNT_NUMBER %in% train$ACCOUNT_NUMBER,]
+X_test <- all[all$ACCOUNT_NUMBER %in% test$ACCOUNT_NUMBER,]
+
+#train XGBoost model
+xgb_model <- xgboost(data = data.matrix(X[,-1]), 
+               label = y, 
+               eta = 0.01,
+               max_depth = 4, 
+               nround = 625,
+               subsample = 1,
+               colsample_bytree = 0.5,
+               min_child_weight = 2,
+               objective = "binary:logistic",
+               eval_metric = 'auc',
+               booster = "gbtree",
+               verbose = 0) 
+```
+
+***
+Compute & plot feature importance matrix
+
+```{r, echo=FALSE, warning=FALSE, fig.width = 7, fig.height = 3.4}
+
+importance_matrix <- xgb.importance(names <- dimnames(data.matrix(X[,-1]))[[2]], model = xgb_model)
+xgb.plot.importance(importance_matrix[1:10,])
+```
+
+
+```{r, echo=TRUE}
+# predict values in test set
+predictions <- predict(xgb_model, data.matrix(X_test[,-1]))
+# predictions <- as.data.frame(predictions)
+
+test_response <- fread("test.csv", stringsAsFactors = FALSE)
+test_response <- test_response %>% select(CHURN)
+
+prediction <- prediction(predictions, test_response)
+
+```
+
+```{r, echo=FALSE, warning=FALSE, fig.width = 7, fig.height = 7}
+prf <- performance(prediction, measure = "tpr", x.measure = "fpr")
+plot(prf)
+```
+
+And finally let's score our model using the Area Under Curve method:
+```{r, echo=TRUE}
+auc <- performance(prediction, measure = "auc")
+auc <- auc@y.values[[1]]
+auc
+
+```
